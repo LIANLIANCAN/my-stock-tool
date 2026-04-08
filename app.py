@@ -17,7 +17,7 @@ st.markdown("""
     <style>
     .stTabs [data-baseweb="tab-list"] { gap: 20px; }
     .stTabs [data-baseweb="tab"] { font-weight: bold; font-size: 16px; padding: 10px 20px; }
-    .ai-insight { background: #fdfdfd; padding: 20px; border-radius: 12px; border: 1px solid #e0e0e0; border-top: 6px solid #28a745; margin-bottom: 25px; }
+    .ai-insight { background: #fdfdfd; padding: 20px; border-radius: 12px; border: 1px solid #e0e0e0; border-left: 8px solid #17a2b8; margin-bottom: 25px; }
     .news-card { background: white; padding: 18px; border-radius: 8px; border-left: 6px solid #1f77b4; margin-bottom: 12px; box-shadow: 0 2px 5px rgba(0,0,0,0.08); }
     .news-title { font-size: 18px; font-weight: bold; color: #1f77b4; text-decoration: none; }
     </style>
@@ -30,51 +30,39 @@ st.sidebar.header("🔍 研究對象")
 ticker_input = st.sidebar.text_input("輸入證券代碼 (如 2330.TW)", value="2330.TW").upper()
 st.sidebar.write(f"台北時間：{now_tw.strftime('%Y-%m-%d %H:%M')}")
 
-# --- 核心數據引擎 (加入終極防禦) ---
+# --- 核心數據引擎 ---
 @st.cache_data(ttl=300)
-def get_institutional_v22_data(ticker):
+def get_institutional_v23_data(ticker):
     from FinMind.data import DataLoader
     dl = DataLoader()
     stock_id = ticker.split(".")[0]
     start_d = (now_tw - timedelta(days=365)).strftime('%Y-%m-%d')
     
-    # 1. 股價與成交量 (終極容錯處理)
+    # 1. 股價與成交量
     df_p = dl.taiwan_stock_daily(stock_id=stock_id, start_date=start_d)
     if not df_p.empty:
-        # 地毯式搜索所有可能的成交量名稱
-        possible_vols = ['vol', 'Trading_Volume', 'Trading_Shares', 'Volume']
-        vol_col = next((c for c in df_p.columns if c in possible_vols), None)
-        
+        vol_col = next((c for c in df_p.columns if c in ['vol', 'Trading_Shares', 'Volume']), None)
         rename_map = {'date':'Date', 'open':'Open', 'max':'High', 'min':'Low', 'close':'Close'}
-        if vol_col: 
-            rename_map[vol_col] = 'Volume'
-            
+        if vol_col: rename_map[vol_col] = 'Volume'
         df_p = df_p.rename(columns=rename_map)
-        
-        # 終極防禦：如果改名後還是沒有 Volume，強制塞入 0 避免當機
-        if 'Volume' not in df_p.columns:
-            df_p['Volume'] = 0
-            
+        if 'Volume' not in df_p.columns: df_p['Volume'] = 0
         df_p['Date'] = pd.to_datetime(df_p['Date'])
         df_p.set_index('Date', inplace=True)
 
     # 2. 三大法人買賣超
     try:
         df_inst = dl.taiwan_stock_institutional_investors(stock_id=stock_id, start_date=(now_tw - timedelta(days=60)).strftime('%Y-%m-%d'))
-    except:
-        df_inst = pd.DataFrame()
+    except: df_inst = pd.DataFrame()
     
-    # 3. 獲利三率
+    # 3. 原始財報數據 (絕對金額)
     try:
-        df_fin = dl.taiwan_stock_financial_statement(stock_id=stock_id, start_date='2023-01-01')
-    except:
-        df_fin = pd.DataFrame()
+        df_fin = dl.taiwan_stock_financial_statement(stock_id=stock_id, start_date='2022-01-01')
+    except: df_fin = pd.DataFrame()
     
     # 4. 營收數據
     try:
         df_rev = dl.taiwan_stock_month_revenue(stock_id=stock_id, start_date='2024-01-01')
-    except:
-        df_rev = pd.DataFrame()
+    except: df_rev = pd.DataFrame()
 
     # 5. Google 新聞
     query = f"{stock_id}+股票" if ".TW" in ticker else ticker
@@ -92,16 +80,14 @@ def get_institutional_v22_data(ticker):
     news_items.sort(key=lambda x: x['ts'], reverse=True)
     
     # 6. 基本面
-    try:
-        info = yf.Ticker(ticker).info
-    except:
-        info = {}
+    try: info = yf.Ticker(ticker).info
+    except: info = {}
         
     return df_p, df_inst, df_fin, df_rev, news_items, info
 
 # --- 執行主程式 ---
 try:
-    df_p, df_inst, df_fin, df_rev, news_list, info = get_institutional_v22_data(ticker_input)
+    df_p, df_inst, df_fin, df_rev, news_list, info = get_institutional_v23_data(ticker_input)
 
     tabs = st.tabs(["📉 技術 & RSI", "📊 獲利三率", "🦅 三大法人籌碼", "📰 即時市場情報"])
 
@@ -118,35 +104,59 @@ try:
                 gain = (delta.where(delta > 0, 0)).rolling(14).mean()
                 loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
                 rsi = 100 - (100 / (1 + gain/loss)).iloc[-1]
-            else:
-                rsi = 50.0
+            else: rsi = 50.0
             c3.metric("RSI (14)", f"{rsi:.1f}")
 
-            # 繪圖 (使用 .get 安全取得成交量)
             fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
             fig.add_trace(go.Candlestick(x=df_p.index, open=df_p['Open'], high=df_p['High'], low=df_p['Low'], close=df_p['Close'], name='K線'), row=1, col=1)
-            
             volume_data = df_p.get('Volume', pd.Series(0, index=df_p.index))
             fig.add_trace(go.Bar(x=df_p.index, y=volume_data, name='成交量', marker_color='#ced4da'), row=2, col=1)
-            
             fig.update_layout(height=600, xaxis_rangeslider_visible=False, template="plotly_white")
             st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.warning("無法取得股價資料，請確認代碼。")
 
     with tabs[1]:
-        st.subheader("📌 獲利三率走勢 (季報)")
+        st.subheader("📌 獲利三率走勢 (季報精算版)")
         if not df_fin.empty:
-            types = ['Gross_Profit_Margin', 'Operating_Profit_Margin', 'Net_Profit_Margin_After_Tax']
-            df_filtered = df_fin[df_fin['type'].isin(types)]
-            fig_fin = go.Figure()
-            for t in types:
-                d = df_filtered[df_filtered['type'] == t]
-                fig_fin.add_trace(go.Scatter(x=d['date'], y=d['value'], name=t, mode='lines+markers'))
-            fig_fin.update_layout(template="plotly_white", yaxis_title="%")
-            st.plotly_chart(fig_fin, use_container_width=True)
+            # --- 財報計算引擎 ---
+            plot_data = []
+            for date, group in df_fin.groupby('date'):
+                group = group.copy()
+                s_type = group['type'].astype(str).fillna('')
+                s_origin = group['origin_name'].astype(str).fillna('') if 'origin_name' in group.columns else ''
+                # 合併中英文欄位名稱，進行地毯式搜索
+                group['search_key'] = s_type + " " + s_origin
+                
+                rev_mask = group['search_key'].str.contains('Revenue|營業收入', case=False, na=False)
+                gp_mask = group['search_key'].str.contains('GrossProfit|毛利', case=False, na=False)
+                op_mask = group['search_key'].str.contains('OperatingIncome|OperatingProfit|營業利益', case=False, na=False)
+                np_mask = group['search_key'].str.contains('IncomeAfterTaxes|NetIncome|本期淨利', case=False, na=False)
+                
+                rev = group[rev_mask]['value'].sum()
+                gp = group[gp_mask]['value'].sum()
+                op = group[op_mask]['value'].sum()
+                ni = group[np_mask]['value'].sum()
+                
+                if rev > 0: # 有營收才能算利潤率
+                    plot_data.append({
+                        'date': date,
+                        '毛利率': (gp / rev) * 100 if gp else None,
+                        '營益率': (op / rev) * 100 if op else None,
+                        '淨利率': (ni / rev) * 100 if ni else None
+                    })
+            
+            if plot_data:
+                df_plot = pd.DataFrame(plot_data)
+                fig_fin = go.Figure()
+                colors = {'毛利率': '#1f77b4', '營益率': '#ff7f0e', '淨利率': '#2ca02c'}
+                for col in ['毛利率', '營益率', '淨利率']:
+                    if df_plot[col].notna().any():
+                        fig_fin.add_trace(go.Scatter(x=df_plot['date'], y=df_plot[col], name=col, mode='lines+markers', line=dict(width=2), marker=dict(size=6)))
+                fig_fin.update_layout(template="plotly_white", yaxis_title="百分比 (%)", hovermode="x unified")
+                st.plotly_chart(fig_fin, use_container_width=True)
+            else:
+                st.warning("無法從原始財報中解析出利潤數據。")
         else:
-            st.info("查無獲利三率數據。")
+            st.info("查無財報數據 (ETF 無此資料)。")
 
     with tabs[2]:
         st.subheader("🦅 三大法人每日淨買賣超 (張)")
@@ -163,7 +173,7 @@ try:
             st.info("查無三大法人籌碼數據。")
 
     with tabs[3]:
-        st.subheader(f"🔥 市場即時情報 (最新發布優先)")
+        st.subheader(f"🔥 市場即時情報")
         if news_list:
             for n in news_list[:15]:
                 st.markdown(f"""
@@ -172,8 +182,6 @@ try:
                     <div style="font-size: 13px; color: #666; margin-top: 8px;">來源: {n['source']} | 發佈時間: {n['display']}</div>
                 </div>
                 """, unsafe_allow_html=True)
-        else:
-            st.warning("新聞抓取中...")
 
     # --- 底部 AI 總結 ---
     st.divider()
@@ -181,12 +189,18 @@ try:
         if not df_p.empty:
             recent_inst = df_inst.tail(3) if not df_inst.empty else pd.DataFrame()
             f_net = recent_inst[recent_inst['name'] == 'Foreign_Investor']['net'].sum() if not recent_inst.empty else 0
+            
+            # 抓取最新算出的毛利率
+            latest_gross = "N/A"
+            if 'df_plot' in locals() and not df_plot.empty and df_plot['毛利率'].notna().any():
+                latest_gross = f"{df_plot['毛利率'].dropna().iloc[-1]:.2f}%"
+
             st.markdown(f"""
             <div class="ai-insight">
                 <h3 style="margin-top:0;">🤖 專業分析師總結 ({ticker_input})</h3>
                 <li><b>籌碼熱度：</b>近三日外資淨操作為 <b>{'買超' if f_net > 0 else '賣超' if f_net < 0 else '中性'}</b>。</li>
                 <li><b>技術指標：</b>RSI 目前為 <b>{rsi:.1f}</b>，處於{'高檔' if rsi > 70 else '低檔' if rsi < 30 else '常態'}區間。</li>
-                <li><b>綜合建議：</b>結合籌碼面與技術面，若法人買超且 RSI 未過熱，可視為偏多訊號。</li>
+                <li><b>獲利能力：</b>最新財報揭露之毛利率為 <b>{latest_gross}</b>。</li>
             </div>
             """, unsafe_allow_html=True)
     except: pass
