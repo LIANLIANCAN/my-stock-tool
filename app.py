@@ -1,103 +1,99 @@
 import streamlit as st
 import yfinance as yf
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
 import pandas as pd
+from datetime import datetime, timedelta
 
-# 網頁基本設定
-st.set_page_config(page_title="My Tool", page_icon="📈", layout="wide")
+# --- 專業介面設定 ---
+st.set_page_config(page_title="Pro Equity Research Terminal", layout="wide")
 
-# 自定義 CSS 讓介面更漂亮
 st.markdown("""
     <style>
-    .main { background-color: #f5f7f9; }
-    .stMetric { background-color: #ffffff; padding: 15px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+    .reportview-container { background: #f0f2f6; }
+    .stMetric { border: 1px solid #d1d4d9; padding: 10px; border-radius: 5px; background: white; }
     </style>
-    """, unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
-st.title("🚀 My Tool | 智慧股市分析")
+st.title("📊 專業投資決策支援系統 (Beta)")
 
-# --- 側邊欄 ---
-st.sidebar.header("🔍 查詢設定")
-ticker_symbol = st.sidebar.text_input("請輸入股票代號", value="AAPL").upper()
-st.sidebar.info("美股如: NVDA, TSLA\n台股如: 2330.TW, 0050.TW")
-
-# 建立 yf.Ticker 物件
-stock = yf.Ticker(ticker_symbol)
-
-# --- 1. 抓取資料函數 (增加快取與偽裝) ---
-@st.cache_data(ttl=3600)
-def get_stock_history(ticker):
-    # 使用 history 獲取 1 個月資料
-    df = stock.history(period="1mo")
-    return df
+# --- 側邊欄：研究參數 ---
+ticker_symbol = st.sidebar.text_input("輸入證券代碼 (如 2330.TW 或 NVDA)", value="2330.TW").upper()
+period = st.sidebar.selectbox("分析週期", ["3mo", "6mo", "1y", "2y", "5y"], index=2)
 
 @st.cache_data(ttl=3600)
-def get_stock_news(ticker):
-    return stock.news[:10]
+def fetch_analysis_data(ticker):
+    stock = yf.Ticker(ticker)
+    # 抓取歷史股價
+    hist = stock.history(period=period)
+    # 抓取基本面快照 (接近財報狗核心數據)
+    info = stock.info
+    return stock, hist, info
 
-# --- 2. 顯示邏輯 ---
-col1, col2 = st.columns([2, 1])
-
-# --- 左側：股價與圖表 ---
-with col1:
-    try:
-        df = get_stock_history(ticker_symbol)
-        if not df.empty:
-            current_price = df['Close'].iloc[-1]
-            prev_price = df['Close'].iloc[0]
-            price_diff = current_price - prev_price
-            pct_change = (price_diff / prev_price) * 100
-            
-            # 顯示現價指標
-            st.metric(label=f"{ticker_symbol} 目前價格", 
-                      value=f"{current_price:.2f}", 
-                      delta=f"{price_diff:.2f} ({pct_change:.2f}%)")
-
-            # Plotly 走勢圖
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=df.index, y=df['Close'], mode='lines', 
-                                     line=dict(color='#007BFF', width=3), name='收盤價'))
-            fig.update_layout(title="最近 30 天走勢", hovermode="x unified",
-                              paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.warning("⚠️ 股價抓取受限，請稍後再試。")
-    except Exception as e:
-        st.error(f"股價載入失敗: {e}")
-
-# --- 右側：AI 智慧分析 ---
-with col2:
-    st.subheader("🤖 AI 趨勢洞察")
-    try:
-        if not df.empty:
-            # 簡單的 AI 分析邏輯
-            avg_price = df['Close'].mean()
-            volatility = df['Close'].std()
-            
-            st.info(f"""
-            **【行銷分析觀點】**
-            * **趨勢判讀**：該股目前較月初{'上升' if current_price > prev_price else '下跌'}了 {abs(pct_change):.1f}%。
-            * **市場情緒**：波動率為 {volatility:.2f}，顯示市場情緒{'相對穩定' if volatility < (avg_price*0.05) else '較為波動'}。
-            * **操作建議**：作為品牌策略考量，建議關注後續{'支撐位' if current_price < avg_price else '回檔風險'}。
-            """)
-        else:
-            st.write("等待數據載入以產生 AI 分析...")
-    except:
-        st.write("暫時無法產生分析報告。")
-
-# --- 下方：新聞區塊 (獨立運作) ---
-st.divider()
-st.subheader("📰 相關市場情報")
 try:
-    news_items = get_stock_news(ticker_symbol)
-    if news_items:
-        for n in news_items:
-            with st.expander(n['title']):
-                st.write(f"來源: {n['publisher']}")
-                st.write(f"發布時間: {datetime.fromtimestamp(n['providerPublishTime'])}")
-                st.markdown(f"[點我閱讀完整新聞]({n['link']})")
-    else:
-        st.write("目前沒有相關新聞。")
+    stock_obj, df, info = fetch_analysis_data(ticker_symbol)
+    
+    # --- 第一區塊：基本面估值 (Fundamental Valuation) ---
+    st.subheader("📌 基本面估值與獲利能力")
+    m1, m2, m3, m4 = st.columns(4)
+    
+    # 處理美股與台股不同的數據欄位
+    pe_ratio = info.get('trailingPE', 'N/A')
+    eps = info.get('trailingEps', 'N/A')
+    roe = info.get('returnOnEquity', 0) * 100
+    div_yield = info.get('dividendYield', 0) * 100 if info.get('dividendYield') else 0
+    
+    m1.metric("本益比 (PE)", f"{pe_ratio if isinstance(pe_ratio, (int, float)) else 'N/A':.2f}")
+    m2.metric("每股盈餘 (EPS)", f"{eps if isinstance(eps, (int, float)) else 'N/A':.2f}")
+    m3.metric("股東權益報酬率 (ROE)", f"{roe:.2f}%")
+    m4.metric("股息殖利率", f"{div_yield:.2f}%")
+
+    # --- 第二區塊：技術面與價格行為 (Price Action) ---
+    st.divider()
+    st.subheader("📈 技術面分析 (均線系統)")
+    
+    # 計算專業分析常用的均線: 月線(20MA)、季線(60MA)
+    df['MA20'] = df['Close'].rolling(window=20).mean()
+    df['MA60'] = df['Close'].rolling(window=60).mean()
+
+    fig = go.Figure()
+    # K線圖 (Candlestick)
+    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'],
+                                 low=df['Low'], close=df['Close'], name='K線'))
+    # 均線
+    fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='orange', width=1), name='20MA (月線)'))
+    fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='purple', width=1), name='60MA (季線)'))
+
+    fig.update_layout(height=600, xaxis_rangeslider_visible=False, 
+                      template="plotly_white", hovermode="x unified")
+    st.plotly_chart(fig, use_container_width=True)
+
+    # --- 第三區塊：研究洞察與市場訊息 ---
+    col_left, col_right = st.columns(2)
+    
+    with col_left:
+        st.subheader("🔍 財務健康度摘要")
+        metrics_df = pd.DataFrame({
+            "指標項目": ["市值", "營收成長 (YoY)", "營業利益率", "負債比率 (Debt/Equity)"],
+            "數據": [
+                f"{info.get('marketCap', 0):,}",
+                f"{info.get('revenueGrowth', 0)*100:.2f}%",
+                f"{info.get('operatingMargins', 0)*100:.2f}%",
+                f"{info.get('debtToEquity', 'N/A')}"
+            ]
+        })
+        st.table(metrics_df)
+
+    with col_right:
+        st.subheader("📰 市場關鍵情報 (News Feed)")
+        news = stock_obj.news[:8]
+        if news:
+            for n in news:
+                st.write(f"**{n['title']}**")
+                st.caption(f"來源: {n['publisher']} | {datetime.fromtimestamp(n['providerPublishTime']).strftime('%Y-%m-%d')}")
+                st.markdown(f"[閱讀分析報告]({n['link']})")
+                st.divider()
+        else:
+            st.info("目前無即時重大訊息。")
+
 except Exception as e:
-    st.write("新聞模組暫時無法運作，請稍後。")
+    st.error(f"數據解析異常。提示：如果是台股，請確保代碼後方有加上 .TW (例如 2330.TW)。詳細錯誤：{e}")
