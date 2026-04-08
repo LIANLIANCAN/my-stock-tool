@@ -8,7 +8,9 @@ import feedparser
 import re
 from dateutil import parser
 
-# --- 專業介面設定 ---
+# ==========================================
+# 1. 專業介面與系統設定
+# ==========================================
 st.set_page_config(page_title="My Tool", layout="wide", page_icon="📈")
 TW_OFFSET = timedelta(hours=8)
 now_tw = datetime.utcnow() + TW_OFFSET
@@ -33,36 +35,45 @@ st.sidebar.header("🔍 研究對象")
 ticker_input = st.sidebar.text_input("輸入證券代碼 (如 2330.TW)", value="2330.TW").upper()
 st.sidebar.write(f"台北時間：{now_tw.strftime('%Y-%m-%d %H:%M')}")
 
-# --- 核心數據引擎 ---
+# ==========================================
+# 2. 核心數據引擎 (終極防禦版)
+# ==========================================
 @st.cache_data(ttl=300)
-def get_institutional_v24_data(ticker):
-    from FinMind.data import DataLoader
-    dl = DataLoader()
+def get_professional_data(ticker):
+    try:
+        from FinMind.data import DataLoader
+        dl = DataLoader()
+    except ImportError:
+        st.error("系統環境建置中，請點擊右下角 'Manage app' -> 'Reboot App'。")
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), [], {}
+
     stock_id = ticker.split(".")[0]
     start_d = (now_tw - timedelta(days=365)).strftime('%Y-%m-%d')
     
-    # 1. 股價與成交量
+    # [1] 股價與成交量
     df_p = dl.taiwan_stock_daily(stock_id=stock_id, start_date=start_d)
     if not df_p.empty:
+        # 自動偵測成交量欄位
         vol_col = next((c for c in df_p.columns if c in ['vol', 'Trading_Shares', 'Volume']), None)
         rename_map = {'date':'Date', 'open':'Open', 'max':'High', 'min':'Low', 'close':'Close'}
         if vol_col: rename_map[vol_col] = 'Volume'
+        
         df_p = df_p.rename(columns=rename_map)
-        if 'Volume' not in df_p.columns: df_p['Volume'] = 0
+        if 'Volume' not in df_p.columns: df_p['Volume'] = 0 # 終極防禦
         df_p['Date'] = pd.to_datetime(df_p['Date'])
         df_p.set_index('Date', inplace=True)
 
-    # 2. 三大法人買賣超
+    # [2] 三大法人籌碼
     try:
         df_inst = dl.taiwan_stock_institutional_investors(stock_id=stock_id, start_date=(now_tw - timedelta(days=60)).strftime('%Y-%m-%d'))
     except: df_inst = pd.DataFrame()
     
-    # 3. 原始財報數據
+    # [3] 原始財報數據
     try:
         df_fin = dl.taiwan_stock_financial_statement(stock_id=stock_id, start_date='2022-01-01')
     except: df_fin = pd.DataFrame()
 
-    # 4. Google 新聞
+    # [4] Google 即時新聞 (精準排序)
     query = f"{stock_id}+股票" if ".TW" in ticker else ticker
     rss = feedparser.parse(f"https://news.google.com/rss/search?q={query}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant")
     news_items = []
@@ -71,33 +82,37 @@ def get_institutional_v24_data(ticker):
             dt = parser.parse(e.published)
             news_items.append({
                 "title": re.sub(r' - .*$', '', e.title), 
-                "link": e.link, "source": e.source.get('title', '媒體'), 
-                "ts": dt, "display": dt.strftime('%m-%d %H:%M')
+                "link": e.link, 
+                "source": e.source.get('title', '媒體'), 
+                "ts": dt, 
+                "display": dt.strftime('%m-%d %H:%M')
             })
         except: continue
-    news_items.sort(key=lambda x: x['ts'], reverse=True)
+    news_items.sort(key=lambda x: x['ts'], reverse=True) # 最新發布優先
     
-    # 5. 基本面
+    # [5] 估值基本面
     try: info = yf.Ticker(ticker).info
     except: info = {}
         
     return df_p, df_inst, df_fin, news_items, info
 
-# --- 執行主程式 ---
+# ==========================================
+# 3. 系統主程式渲染
+# ==========================================
 try:
-    df_p, df_inst, df_fin, news_list, info = get_institutional_v24_data(ticker_input)
+    df_p, df_inst, df_fin, news_list, info = get_professional_data(ticker_input)
 
     tabs = st.tabs(["📉 技術 & RSI", "📊 獲利三率", "🦅 三大法人籌碼", "📰 即時市場情報"])
 
-    # ==========================================
+    # ------------------------------------------
     # 分頁 1: 技術面分析
-    # ==========================================
+    # ------------------------------------------
     with tabs[0]:
         if not df_p.empty:
             curr_p = df_p['Close'].iloc[-1]
-            ma20 = df_p['Close'].rolling(20).mean().iloc[-1]
+            ma20 = df_p['Close'].rolling(20).mean().iloc[-1] if len(df_p) >= 20 else curr_p
             
-            # RSI 安全計算
+            # 計算 RSI
             if len(df_p) >= 14:
                 delta = df_p['Close'].diff()
                 gain = (delta.where(delta > 0, 0)).rolling(14).mean()
@@ -105,12 +120,11 @@ try:
                 rsi = 100 - (100 / (1 + gain/loss)).iloc[-1]
             else: rsi = 50.0
 
-            # 🎯 專屬技術面 AI 總結
             st.markdown(f"""
             <div class="ai-insight ai-tech">
                 <h4 style="margin-top:0;">🤖 價格行為與技術面研判</h4>
                 <li><b>趨勢強度：</b>目前股價 {'大於' if curr_p > ma20 else '小於'} 月均線 (20MA)，短期趨勢偏向 <b>{'多頭' if curr_p > ma20 else '空頭'}</b>。</li>
-                <li><b>動能指標：</b>RSI(14) 為 {rsi:.1f}，顯示市場情緒處於 <b>{'過熱' if rsi > 70 else '超賣' if rsi < 30 else '中性穩健'}</b> 狀態。</li>
+                <li><b>動能指標：</b>RSI(14) 為 {rsi:.1f}，顯示市場情緒處於 <b>{'過熱' if rsi > 70 else '超賣' if rsi < 30 else '常態穩健'}</b> 狀態。</li>
                 <li><b>估值參考：</b>目前 P/B 比為 {info.get('priceToBook', 'N/A')}。</li>
             </div>
             """, unsafe_allow_html=True)
@@ -120,6 +134,7 @@ try:
             c2.metric("月均線 (20MA)", f"{ma20:.2f}")
             c3.metric("RSI (14)", f"{rsi:.1f}")
 
+            # K線圖繪製
             fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
             fig.add_trace(go.Candlestick(x=df_p.index, open=df_p['Open'], high=df_p['High'], low=df_p['Low'], close=df_p['Close'], name='K線'), row=1, col=1)
             volume_data = df_p.get('Volume', pd.Series(0, index=df_p.index))
@@ -127,13 +142,19 @@ try:
             fig.update_layout(height=500, xaxis_rangeslider_visible=False, template="plotly_white", margin=dict(t=20, b=20))
             st.plotly_chart(fig, use_container_width=True)
 
-            # 將數據藏進展開器
-            with st.expander("📄 檢視歷史價格明細數據"):
-                st.dataframe(df_p.tail(10).sort_index(ascending=False), use_container_width=True)
+            # 中文化數據表
+            with st.expander("📄 檢視歷史價格明細數據 (中文版)"):
+                display_df = df_p.tail(10).sort_index(ascending=False).copy()
+                tw_columns = {'Open': '開盤價', 'High': '最高價', 'Low': '最低價', 'Close': '收盤價', 'Volume': '成交量'}
+                display_df = display_df.rename(columns=tw_columns)
+                display_df.index.name = '日期'
+                st.dataframe(display_df, use_container_width=True)
+        else:
+            st.warning("⚠️ 無法取得股價資料，請確認代碼是否正確。")
 
-    # ==========================================
-    # 分頁 2: 財報分析
-    # ==========================================
+    # ------------------------------------------
+    # 分頁 2: 財報分析 (三率精算)
+    # ------------------------------------------
     with tabs[1]:
         if not df_fin.empty:
             plot_data = []
@@ -157,15 +178,14 @@ try:
             if plot_data:
                 df_plot = pd.DataFrame(plot_data)
                 
-                # 🎯 專屬財報面 AI 總結
                 latest_gross = df_plot['毛利率'].dropna().iloc[-1] if df_plot['毛利率'].notna().any() else 0
                 prev_gross = df_plot['毛利率'].dropna().iloc[-2] if len(df_plot['毛利率'].dropna()) > 1 else 0
                 
                 st.markdown(f"""
                 <div class="ai-insight ai-fund">
                     <h4 style="margin-top:0;">🤖 企業獲利護城河研判</h4>
-                    <li><b>最新毛利率：</b>本季為 <b>{latest_gross:.2f}%</b>，較上一季 {'成長' if latest_gross > prev_gross else '衰退'}。</li>
-                    <li><b>利潤結構：</b>毛利率代表產品競爭力，營益率代表管理效能。若兩者同步攀升，代表本業獲利極佳。</li>
+                    <li><b>最新毛利率：</b>本季為 <b>{latest_gross:.2f}%</b>，較上季 {'成長' if latest_gross > prev_gross else '衰退'}。</li>
+                    <li><b>利潤結構：</b>毛利率代表產品競爭力，若三率同步攀升，代表本業獲利處於極佳狀態。</li>
                 </div>
                 """, unsafe_allow_html=True)
 
@@ -176,24 +196,22 @@ try:
                 fig_fin.update_layout(template="plotly_white", yaxis_title="百分比 (%)", hovermode="x unified", margin=dict(t=20, b=20))
                 st.plotly_chart(fig_fin, use_container_width=True)
 
-                # 將數據藏進展開器
                 with st.expander("📄 檢視獲利三率具體數值 (季報)"):
                     st.dataframe(df_plot.set_index('date').sort_index(ascending=False).style.format("{:.2f}%"), use_container_width=True)
             else:
-                st.warning("無法解析出百分比利潤數據。")
+                st.warning("⚠️ 無法解析出百分比利潤數據。")
         else:
-            st.info("查無財報數據 (ETF無此資料)。")
+            st.info("💡 查無財報數據 (ETF 無此資料)。")
 
-    # ==========================================
+    # ------------------------------------------
     # 分頁 3: 籌碼分析
-    # ==========================================
+    # ------------------------------------------
     with tabs[2]:
         if not df_inst.empty:
             df_inst['net'] = df_inst['buy'] - df_inst['sell']
             recent_f = df_inst[df_inst['name'] == 'Foreign_Investor'].tail(5)['net'].sum()
             recent_t = df_inst[df_inst['name'] == 'Investment_Trust'].tail(5)['net'].sum()
 
-            # 🎯 專屬籌碼面 AI 總結
             st.markdown(f"""
             <div class="ai-insight ai-inst">
                 <h4 style="margin-top:0;">🤖 聰明錢 (Smart Money) 資金流向</h4>
@@ -211,13 +229,13 @@ try:
             fig_inst.update_layout(barmode='relative', template="plotly_white", margin=dict(t=20, b=20))
             st.plotly_chart(fig_inst, use_container_width=True)
         else:
-            st.info("查無三大法人籌碼數據。")
+            st.info("💡 查無三大法人籌碼數據。")
 
-    # ==========================================
+    # ------------------------------------------
     # 分頁 4: 新聞
-    # ==========================================
+    # ------------------------------------------
     with tabs[3]:
-        st.subheader(f"🔥 市場即時情報")
+        st.subheader(f"🔥 市場即時情報 (自動最新排序)")
         if news_list:
             for n in news_list[:15]:
                 st.markdown(f"""
@@ -226,6 +244,8 @@ try:
                     <div style="font-size: 13px; color: #666; margin-top: 8px;">來源: {n['source']} | 發佈: {n['display']}</div>
                 </div>
                 """, unsafe_allow_html=True)
+        else:
+            st.warning("⚠️ 新聞抓取中，若持續無資料請稍後再試。")
 
 except Exception as e:
-    st.error(f"系統異常：{e}")
+    st.error(f"系統異常：請確保輸入正確的代碼並 Reboot App。詳細錯誤: {e}")
