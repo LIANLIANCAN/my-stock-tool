@@ -6,122 +6,103 @@ from datetime import datetime, timedelta
 try:
     from FinMind.data import DataLoader
 except ImportError:
-    st.error("系統正在安裝組件，請點擊右下角 Manage app -> Reboot 確保環境完整。")
+    st.error("組件安裝中，請執行 Reboot App。")
 
-# --- 專業介面設定 ---
+# --- 專業介面與時區設定 ---
 st.set_page_config(page_title="My Tool", layout="wide", page_icon="📈")
+TW_OFFSET = timedelta(hours=8)
+now_tw = datetime.utcnow() + TW_OFFSET
 
 st.markdown("""
     <style>
-    .news-card { background-color: white; padding: 15px; border-radius: 8px; border-left: 5px solid #1f77b4; margin-bottom: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-    .stMetric { background-color: white; padding: 10px; border-radius: 8px; border: 1px solid #eee; }
+    .reportview-container { background: #f8f9fa; }
+    .stTabs [data-baseweb="tab-list"] { gap: 24px; }
+    .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; font-weight: bold; }
     </style>
 """, unsafe_allow_html=True)
 
 st.title("📈 My Tool")
 
-# --- 側邊欄 ---
+# --- 側邊欄：研究參數 ---
 st.sidebar.header("📊 研究對象")
-ticker_input = st.sidebar.text_input("輸入證券代碼 (如 2330.TW 或 NVDA)", value="2330.TW").upper()
-period_map = {"3個月": 90, "6個月": 180, "1年": 365, "2年": 730}
-selected_label = st.sidebar.selectbox("分析週期", list(period_map.keys()), index=1)
-days = period_map[selected_label]
+ticker_input = st.sidebar.text_input("輸入證券代碼 (如 2330.TW)", value="2330.TW").upper()
+st.sidebar.caption(f"台北時間: {now_tw.strftime('%Y-%m-%d %H:%M:%S')}")
 
-# --- 數據抓取函數 ---
-@st.cache_data(ttl=3600)
-def fetch_stock_data(ticker, days):
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=days)
-    try:
-        if ".TW" in ticker:
-            dl = DataLoader()
-            df = dl.taiwan_stock_daily(stock_id=ticker.split(".")[0], 
-                                       start_date=start_date.strftime('%Y-%m-%d'), 
-                                       end_date=end_date.strftime('%Y-%m-%d'))
-            df = df.rename(columns={'date': 'Date', 'open': 'Open', 'max': 'High', 'min': 'Low', 'close': 'Close'})
-            df.set_index('Date', inplace=True)
-            df.index = pd.to_datetime(df.index)
-            return df, "FinMind (台股通道)"
-        else:
-            df = yf.Ticker(ticker).history(period=f"{days}d")
-            return df, "yfinance (美股通道)"
-    except:
-        return None, "連線失敗"
-
-@st.cache_data(ttl=3600)
-def fetch_market_news(ticker):
-    """專屬新聞抓取邏輯：台股走 FinMind，美股走 Yahoo"""
-    news_list = []
-    if ".TW" in ticker:
-        try:
-            dl = DataLoader()
-            # 抓取最近 7 天的新聞
-            raw_news = dl.taiwan_stock_news(stock_id=ticker.split(".")[0], 
-                                            start_date=(datetime.now()-timedelta(days=7)).strftime('%Y-%m-%d'))
-            for _, row in raw_news.iterrows():
-                news_list.append({
-                    "title": row['title'],
-                    "publisher": row['source'],
-                    "link": row['link'],
-                    "date": row['date']
-                })
-        except: pass
-    else:
-        try:
-            y_news = yf.Ticker(ticker).news
-            for n in y_news:
-                news_list.append({
-                    "title": n['title'],
-                    "publisher": n['publisher'],
-                    "link": n['link'],
-                    "date": datetime.fromtimestamp(n['providerPublishTime']).strftime('%Y-%m-%d')
-                })
-        except: pass
-    return news_list
-
-# --- 介面呈現 ---
-try:
-    df, source_name = fetch_stock_data(ticker_input, days)
+# --- 數據抓取模組 (強化即時性) ---
+@st.cache_data(ttl=600) # 縮短快取至 10 分鐘，確保新聞即時
+def get_pro_data(ticker):
+    dl = DataLoader()
+    stock_id = ticker.split(".")[0]
     
-    if df is not None and not df.empty:
-        # 1. 頂部指標
-        c1, c2, c3 = st.columns(3)
-        curr_p = df['Close'].iloc[-1]
-        prev_p = df['Close'].iloc[-2]
-        diff = curr_p - prev_p
-        c1.metric(f"{ticker_input} 最新價格", f"{curr_p:.2f}", f"{diff:.2f} ({ (diff/prev_p)*100 :.2f}%)")
-        c2.metric("數據來源", source_name)
-        c3.metric("更新時間", datetime.now().strftime('%H:%M:%S'))
+    # 1. 抓取股價 (1年期)
+    start_p = (now_tw - timedelta(days=365)).strftime('%Y-%m-%d')
+    df_price = dl.taiwan_stock_daily(stock_id=stock_id, start_date=start_p)
+    if not df_price.empty:
+        df_price = df_price.rename(columns={'date':'Date','open':'Open','max':'High','min':'Low','close':'Close'})
+        df_price['Date'] = pd.to_datetime(df_price['Date'])
+        df_price.set_index('Date', inplace=True)
 
-        # 2. 技術圖表
-        st.subheader("📈 價格走勢與技術形態")
-        df['MA20'] = df['Close'].rolling(window=20).mean()
-        df['MA60'] = df['Close'].rolling(window=60).mean()
+    # 2. 抓取即時新聞 (最近 14 天)
+    start_n = (now_tw - timedelta(days=14)).strftime('%Y-%m-%d')
+    df_news = dl.taiwan_stock_news(stock_id=stock_id, start_date=start_n)
+    
+    # 3. 財報分析數據 (營收)
+    df_rev = dl.taiwan_stock_month_revenue(stock_id=stock_id, start_date='2023-01-01')
+    
+    return df_price, df_news, df_rev
+
+# --- 主程式呈現 ---
+try:
+    df_price, df_news, df_rev = get_pro_data(ticker_input)
+
+    # 建立分頁
+    tab1, tab2, tab3 = st.tabs(["📉 技術面分析", "📊 財報分析", "📰 即時情報"])
+
+    with tab1:
+        # 價格指標
+        curr_p = df_price['Close'].iloc[-1]
+        prev_p = df_price['Close'].iloc[-2]
+        diff = curr_p - prev_p
+        st.metric(f"{ticker_input} 最新價格", f"{curr_p:.2f}", f"{diff:.2f} ({(diff/prev_p)*100:.2f}%)")
+
+        # 技術圖表 (MA20/MA60)
+        df_price['MA20'] = df_price['Close'].rolling(20).mean()
+        df_price['MA60'] = df_price['Close'].rolling(60).mean()
         fig = go.Figure()
-        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='K線'))
-        fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='#FFA500', width=1), name='20MA'))
-        fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='#800080', width=1), name='60MA'))
-        fig.update_layout(height=450, xaxis_rangeslider_visible=False, template="plotly_white", margin=dict(l=0,r=0,t=0,b=0))
+        fig.add_trace(go.Candlestick(x=df_price.index, open=df_price['Open'], high=df_price['High'], low=df_price['Low'], close=df_price['Close'], name='K線'))
+        fig.add_trace(go.Scatter(x=df_price.index, y=df_price['MA20'], line=dict(color='orange'), name='20MA'))
+        fig.add_trace(go.Scatter(x=df_price.index, y=df_price['MA60'], line=dict(color='purple'), name='60MA'))
+        fig.update_layout(height=500, xaxis_rangeslider_visible=False, template="plotly_white")
         st.plotly_chart(fig, use_container_width=True)
 
-        # 3. 新聞區塊 (獨立渲染)
-        st.divider()
-        st.subheader("📰 重大訊息與相關新聞")
-        news_data = fetch_market_news(ticker_input)
-        
-        if news_data:
-            for n in news_data:
-                st.markdown(f"""
-                <div class="news-card">
-                    <div style="font-weight: bold; font-size: 16px;"><a href="{n['link']}" target="_blank" style="text-decoration: none; color: #1f77b4;">{n['title']}</a></div>
-                    <div style="font-size: 12px; color: #666; margin-top: 5px;">來源: {n['publisher']} | 日期: {n['date']}</div>
-                </div>
-                """, unsafe_allow_html=True)
+    with tab2:
+        st.subheader("📌 財報核心：每月營收走勢")
+        if not df_rev.empty:
+            # 轉換時間格式
+            df_rev['date'] = pd.to_datetime(df_rev['revenue_month'], format='%Y-%m-%d')
+            fig_rev = go.Figure()
+            fig_rev.add_trace(go.Bar(x=df_rev['date'], y=df_rev['revenue'], name='單月營收'))
+            fig_rev.update_layout(title=f"{ticker_input} 營收變化 (單位:元)", template="plotly_white")
+            st.plotly_chart(fig_rev, use_container_width=True)
+            
+            # 數據表摘要
+            st.write("**營收明細表 (最近 6 個月)**")
+            st.dataframe(df_rev[['revenue_month', 'revenue', 'revenue_month_growth_percent']].tail(6), use_container_width=True)
         else:
-            st.warning("⚠️ 目前無法從 Yahoo/FinMind 獲取新聞。這通常是 API 流量限制，請稍候再試。")
+            st.warning("查無該標的之財報數據。")
 
-    else:
-        st.error("無法載入股價數據。請檢查代碼是否正確或重啟 App。")
+    with tab3:
+        st.subheader(f"🔥 即時重大訊息 (台北時間: {now_tw.strftime('%m/%d')})")
+        if not df_news.empty:
+            # 依照日期排序（最晚到最早）
+            df_news = df_news.sort_values('date', ascending=False)
+            for _, n in df_news.iterrows():
+                with st.container():
+                    st.markdown(f"**[{n['title']}]({n['link']})**")
+                    st.caption(f"來源: {n['source']} | 發佈日期: {n['date']}")
+                    st.divider()
+        else:
+            st.info("過去 14 天內無重大新聞訊息。")
 
 except Exception as e:
-    st.error(f"系統異常：{e}")
+    st.error(f"分析異常: {e}")
