@@ -8,10 +8,10 @@ from datetime import datetime, timedelta
 try:
     from FinMind.data import DataLoader
 except ImportError:
-    st.error("Modules installing... Please click 'Manage app' -> 'Reboot App'.")
+    st.error("系統組件安裝中... 請點擊右下角 'Manage app' -> 'Reboot App'。")
 
 # --- 專業介面與時區設定 ---
-st.set_page_config(page_title="my tool", layout="wide", page_icon="📈")
+st.set_page_config(page_title="My Tool", layout="wide", page_icon="📈")
 TW_OFFSET = timedelta(hours=8)
 now_tw = datetime.utcnow() + TW_OFFSET
 
@@ -24,13 +24,13 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# 網站主標題更名為 my tool
-st.title("📈 my tool")
+# 標題更名為 My Tool
+st.title("📈 My Tool")
 
 # --- 側邊欄 ---
-st.sidebar.header("Analysis Target")
-ticker_input = st.sidebar.text_input("Ticker Symbol (e.g. 2330.TW)", value="2330.TW").upper()
-st.sidebar.write(f"Taipei Time: {now_tw.strftime('%Y-%m-%d %H:%M')}")
+st.sidebar.header("🔍 研究對象")
+ticker_input = st.sidebar.text_input("輸入證券代碼 (如 2330.TW)", value="2330.TW").upper()
+st.sidebar.write(f"台北時間：{now_tw.strftime('%Y-%m-%d %H:%M')}")
 
 # --- 數據抓取模組 ---
 @st.cache_data(ttl=300)
@@ -38,14 +38,14 @@ def get_full_analysis_data(ticker):
     dl = DataLoader()
     stock_id = ticker.split(".")[0]
     
-    # 1. Price & Volume
+    # 1. 股價與成交量
     df_price = dl.taiwan_stock_daily(stock_id=stock_id, start_date=(now_tw - timedelta(days=365)).strftime('%Y-%m-%d'))
     if not df_price.empty:
         df_price = df_price.rename(columns={'date':'Date','open':'Open','max':'High','min':'Low','close':'Close','vol':'Volume'})
         df_price['Date'] = pd.to_datetime(df_price['Date'])
         df_price.set_index('Date', inplace=True)
 
-    # 2. News & Info (yfinance)
+    # 2. 新聞與基本面 (yfinance)
     y_stock = yf.Ticker(ticker)
     try:
         y_info = y_stock.info
@@ -54,12 +54,12 @@ def get_full_analysis_data(ticker):
         y_info = {}
         y_news = []
     
-    # 3. Monthly Revenue
+    # 3. 每月營收數據
     df_rev = dl.taiwan_stock_month_revenue(stock_id=stock_id, start_date='2024-01-01')
     
     return df_price, y_news, df_rev, y_info
 
-# --- 計算 RSI ---
+# --- 計算 RSI 指標 ---
 def calculate_rsi(data, window=14):
     diff = data.diff(1)
     gain = diff.where(diff > 0, 0)
@@ -80,65 +80,83 @@ def generate_advanced_ai_insight(df_p, df_r, info, ticker):
         
         insight = f"""
         <div class="ai-insight">
-            <h3 style="margin-top:0;">🤖 AI Investment Insight ({ticker})</h3>
+            <h3 style="margin-top:0;">🤖 AI 投資觀察總結 ({ticker})</h3>
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-                <div><b>Technical:</b> {'Overbought' if rsi > 70 else 'Oversold' if rsi < 30 else 'Neutral'} (RSI: {rsi:.1f})<br>
-                     <b>Trend:</b> {'Bullish' if curr_p > ma20 else 'Bearish'} (Above MA20: {'Yes' if curr_p > ma20 else 'No'})</div>
-                <div><b>Valuation:</b> P/B Ratio: {pb_ratio if isinstance(pb_ratio, float) else 'N/A'}<br>
-                     <b>Revenue:</b> MoM Growth: {rev_mom:.1f}%</div>
+                <div><b>技術評價：</b>{'市場過熱' if rsi > 70 else '市場超賣' if rsi < 30 else '中性整理'} (RSI: {rsi:.1f})<br>
+                     <b>趨勢力道：</b>{'多頭排列' if curr_p > ma20 else '空頭整理'} (站於月線上: {'是' if curr_p > ma20 else '否'})</div>
+                <div><b>估值參考：</b>股價淨值比 (P/B): {pb_ratio if isinstance(pb_ratio, float) else 'N/A'}<br>
+                     <b>營收動能：</b>月增率 (MoM): {rev_mom:.1f}%</div>
             </div>
             <p style="margin-top:15px; border-top: 1px solid #eee; padding-top:10px;">
-                <b>Summary:</b> Currently the asset shows {'strong' if rev_mom > 0 and curr_p > ma20 else 'weak'} momentum. 
-                Keep track of support levels if RSI remains below 50.
+                <b>分析師建議：</b>目前該標的{'動能強勁且基本面優異' if rev_mom > 0 and curr_p > ma20 else '處於震盪階段'}。
+                建議{'持續追蹤支撐位' if rsi < 50 else '留意高檔反轉風險'}。
             </p>
         </div>
         """
         return insight
     except:
-        return "<div class='ai-insight'>⚠️ Generating AI report... Please wait.</div>"
+        return "<div class='ai-insight'>⚠️ AI 報告分析中... 請確保代碼正確且數據完整。</div>"
 
-# --- Main Logic ---
+# --- 主程式呈現 ---
 try:
     df_p, news_list, df_r, info = get_full_analysis_data(ticker_input)
 
-    tab1, tab2, tab3 = st.tabs(["📉 Technicals", "📊 Fundamentals", "📰 News Feed"])
+    tab1, tab2, tab3 = st.tabs(["📉 技術面分析", "📊 財報深度分析", "📰 即時市場情報"])
 
     with tab1:
         if not df_p.empty:
             c1, c2, c3 = st.columns(3)
             curr_p = df_p['Close'].iloc[-1]
-            c1.metric("Last Price", f"{curr_p:.2f}")
-            c2.metric("P/B Ratio", f"{info.get('priceToBook', 'N/A')}")
-            c3.metric("RSI (14)", f"{calculate_rsi(df_p['Close']).iloc[-1]:.1f}")
+            c1.metric("最新報價", f"{curr_p:.2f}")
+            c2.metric("股價淨值比 (P/B)", f"{info.get('priceToBook', 'N/A')}")
+            c3.metric("RSI (相對強弱)", f"{calculate_rsi(df_p['Close']).iloc[-1]:.1f}")
 
-            # Advance Charting
+            # 進階技術圖表 (K線 + RSI + 成交量)
             fig = make_subplots(rows=3, cols=1, shared_xaxes=True, 
                                vertical_spacing=0.05, row_heights=[0.5, 0.2, 0.3])
+            
+            # 1. K線圖
             fig.add_trace(go.Candlestick(x=df_p.index, open=df_p['Open'], high=df_p['High'], 
-                                         low=df_p['Low'], close=df_p['Close'], name='Candlestick'), row=1, col=1)
+                                         low=df_p['Low'], close=df_p['Close'], name='K線'), row=1, col=1)
+            
+            # 2. RSI 指標圖
             rsi_series = calculate_rsi(df_p['Close'])
             fig.add_trace(go.Scatter(x=df_p.index, y=rsi_series, line=dict(color='#FF5722'), name='RSI'), row=2, col=1)
             fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
             fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
-            fig.add_trace(go.Bar(x=df_p.index, y=df_p['Volume'], name='Volume', marker_color='#1f77b4'), row=3, col=1)
+
+            # 3. 成交量圖
+            fig.add_trace(go.Bar(x=df_p.index, y=df_p['Volume'], name='成交量', marker_color='#1f77b4'), row=3, col=1)
+
             fig.update_layout(height=800, xaxis_rangeslider_visible=False, template="plotly_white")
             st.plotly_chart(fig, use_container_width=True)
 
     with tab2:
         if not df_r.empty:
             df_r['date_fixed'] = pd.to_datetime(df_r['revenue_year'].astype(str) + '-' + df_r['revenue_month'].astype(str) + '-01')
+            
+            # 顯示 AI 觀察總結
             st.markdown(generate_advanced_ai_insight(df_p, df_r, info, ticker_input), unsafe_allow_html=True)
+            
+            # 營收走勢圖
             fig_rev = go.Figure()
-            fig_rev.add_trace(go.Bar(x=df_r['date_fixed'], y=df_r['revenue'], name='Revenue'))
-            fig_rev.update_layout(title="Monthly Revenue Trend", template="plotly_white")
+            fig_rev.add_trace(go.Bar(x=df_r['date_fixed'], y=df_r['revenue'], name='月營收', marker_color='#1f77b4'))
+            fig_rev.update_layout(title="每月營收走勢 (財報狗同步指標)", template="plotly_white")
             st.plotly_chart(fig_rev, use_container_width=True)
 
     with tab3:
         if news_list:
             for n in news_list[:12]:
                 raw_time = n.get('providerPublishTime', 0)
-                pub_date = datetime.fromtimestamp(raw_time).strftime('%Y-%m-%d %H:%M') if raw_time else "Today"
-                st.markdown(f'<div class="news-card"><b><a href="{n.get("link","#")}" target="_blank">{n.get("title")}</a></b><br><small>{n.get("publisher")} | {pub_date}</small></div>', unsafe_allow_html=True)
+                pub_date = datetime.fromtimestamp(raw_time).strftime('%Y-%m-%d %H:%M') if raw_time else "今日"
+                st.markdown(f"""
+                <div class="news-card">
+                    <b><a href="{n.get('link','#')}" target="_blank" style="text-decoration:none; color:#1f77b4;">{n.get('title')}</a></b><br>
+                    <small>來源: {n.get('publisher')} | 發佈時間: {pub_date}</small>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.warning("⚠️ 暫時無法獲取即時新聞。")
 
 except Exception as e:
-    st.error(f"Analysis Error: {e}")
+    st.error(f"系統異常：{e}")
