@@ -5,3 +5,4 @@ pandas
 FinMind
 tqdm
 requests
+feedparser
