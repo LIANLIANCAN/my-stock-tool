@@ -6,8 +6,9 @@ import pandas as pd
 from datetime import datetime, timedelta
 import feedparser
 import re
+from dateutil import parser
 
-# --- 專業介面與風格設定 ---
+# --- 專業介面設定 ---
 st.set_page_config(page_title="My Tool", layout="wide", page_icon="📈")
 TW_OFFSET = timedelta(hours=8)
 now_tw = datetime.utcnow() + TW_OFFSET
@@ -16,8 +17,9 @@ st.markdown("""
     <style>
     .stTabs [data-baseweb="tab-list"] { gap: 20px; }
     .stTabs [data-baseweb="tab"] { font-weight: bold; font-size: 16px; padding: 10px 20px; }
-    .ai-insight { background: #f8f9fa; padding: 20px; border-radius: 12px; border: 1px solid #dee2e6; border-left: 8px solid #17a2b8; margin-bottom: 20px; }
-    .news-card { background: white; padding: 15px; border-radius: 8px; border-left: 5px solid #007bff; margin-bottom: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+    .ai-insight { background: #fdfdfd; padding: 20px; border-radius: 12px; border: 1px solid #e0e0e0; border-top: 6px solid #28a745; margin-bottom: 25px; }
+    .news-card { background: white; padding: 18px; border-radius: 8px; border-left: 6px solid #1f77b4; margin-bottom: 12px; box-shadow: 0 2px 5px rgba(0,0,0,0.08); }
+    .news-title { font-size: 18px; font-weight: bold; color: #1f77b4; text-decoration: none; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -30,7 +32,7 @@ st.sidebar.write(f"台北時間：{now_tw.strftime('%Y-%m-%d %H:%M')}")
 
 # --- 核心數據引擎 ---
 @st.cache_data(ttl=300)
-def get_institutional_engine(ticker):
+def get_institutional_v21_data(ticker):
     from FinMind.data import DataLoader
     dl = DataLoader()
     stock_id = ticker.split(".")[0]
@@ -45,96 +47,124 @@ def get_institutional_engine(ticker):
         df_p['Date'] = pd.to_datetime(df_p['Date'])
         df_p.set_index('Date', inplace=True)
 
-    # 2. 三大法人買賣超 (籌碼面核心)
+    # 2. 三大法人買賣超
     df_inst = dl.taiwan_stock_institutional_investors(stock_id=stock_id, start_date=(now_tw - timedelta(days=60)).strftime('%Y-%m-%d'))
     
-    # 3. 獲利三率 (季報核心)
-    df_fin = dl.taiwan_stock_financial_statements(stock_id=stock_id, start_date='2023-01-01')
-    
-    # 4. 營收
-    df_rev = dl.taiwan_stock_month_revenue(stock_id=stock_id, start_date='2024-01-01')
-    
-    return df_p, df_inst, df_fin, df_rev
-
-# --- AI 進階分析邏析 ---
-def generate_pro_ai_insight(df_p, df_inst, df_fin, ticker):
+    # 3. 獲利三率 (修正方法名稱: 移除結尾的 s)
     try:
-        # 籌碼面判斷：近五日外資與投信動向
-        recent_inst = df_inst.tail(5)
-        foreign_buy = recent_inst[recent_inst['name'] == 'Foreign_Investor']['buy'].sum() - recent_inst[recent_inst['name'] == 'Foreign_Investor']['sell'].sum()
-        itrust_buy = recent_inst[recent_inst['name'] == 'Investment_Trust']['buy'].sum() - recent_inst[recent_inst['name'] == 'Investment_Trust']['sell'].sum()
-        
-        # 獲利三率判斷 (最新一季)
-        latest_fin = df_fin[df_fin['type'] == 'Gross_Profit_Margin'].iloc[-1]['value']
-        
-        insight = f"""
-        <div class="ai-insight">
-            <h3 style="margin-top:0;">🤖 專業分析師週報 ({ticker})</h3>
-            <ul style="line-height: 1.8;">
-                <li><b>籌碼動向：</b>近五日外資淨操作為 <b>{'買超' if foreign_buy > 0 else '賣超'}</b>；投信淨操作為 <b>{'買超' if itrust_buy > 0 else '賣超'}</b>。</li>
-                <li><b>獲利指標：</b>最新揭露毛利率為 <b>{latest_fin:.2f}%</b>。</li>
-                <li><b>綜合研判：</b>{'籌碼面偏向多頭排列，且基本面穩健，適合擇機佈局。' if foreign_buy > 0 and itrust_buy > 0 else '籌碼出現分歧或撤離訊號，建議轉向保守觀望。'}</li>
-            </ul>
-        </div>
-        """
-        return insight
-    except: return "<div class='ai-insight'>分析報告生成中...請稍候。</div>"
+        df_fin = dl.taiwan_stock_financial_statement(stock_id=stock_id, start_date='2023-01-01')
+    except:
+        df_fin = pd.DataFrame()
+    
+    # 4. 營收數據
+    try:
+        df_rev = dl.taiwan_stock_month_revenue(stock_id=stock_id, start_date='2024-01-01')
+    except:
+        df_rev = pd.DataFrame()
 
-# --- 主程式 ---
+    # 5. Google 新聞 (精準排序)
+    query = f"{stock_id}+股票" if ".TW" in ticker else ticker
+    rss = feedparser.parse(f"https://news.google.com/rss/search?q={query}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant")
+    news_items = []
+    for e in rss.entries:
+        try:
+            dt = parser.parse(e.published)
+            news_items.append({
+                "title": re.sub(r' - .*$', '', e.title), 
+                "link": e.link, "source": e.source.get('title', '媒體'), 
+                "ts": dt, "display": dt.strftime('%m-%d %H:%M')
+            })
+        except: continue
+    news_items.sort(key=lambda x: x['ts'], reverse=True)
+    
+    # 6. 基本面
+    try:
+        info = yf.Ticker(ticker).info
+    except:
+        info = {}
+        
+    return df_p, df_inst, df_fin, df_rev, news_items, info
+
+# --- 執行主程式 ---
 try:
-    df_p, df_inst, df_fin, df_r = get_institutional_engine(ticker_input)
+    df_p, df_inst, df_fin, df_rev, news_list, info = get_institutional_v21_data(ticker_input)
 
-    tabs = st.tabs(["📉 技術 & RSI", "📊 獲利三率", "🦅 三大法人籌碼", "📰 即時情報"])
+    tabs = st.tabs(["📉 技術 & RSI", "📊 獲利三率", "🦅 三大法人籌碼", "📰 即時市場情報"])
 
     with tabs[0]:
-        # RSI 與 K 線
-        delta = df_p['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        rsi = 100 - (100 / (1 + gain/loss)).iloc[-1]
-        st.metric("最新報價", f"{df_p['Close'].iloc[-1]:.2f}", f"RSI: {rsi:.1f}")
-        
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
-        fig.add_trace(go.Candlestick(x=df_p.index, open=df_p['Open'], high=df_p['High'], low=df_p['Low'], close=df_p['Close'], name='K線'), row=1, col=1)
-        fig.add_trace(go.Bar(x=df_p.index, y=df_p['Volume'], name='成交量', marker_color='#ced4da'), row=2, col=1)
-        fig.update_layout(height=600, xaxis_rangeslider_visible=False, template="plotly_white")
-        st.plotly_chart(fig, use_container_width=True)
+        if not df_p.empty:
+            c1, c2, c3 = st.columns(3)
+            curr_p = df_p['Close'].iloc[-1]
+            c1.metric("最新報價", f"{curr_p:.2f}", f"{curr_p - df_p['Close'].iloc[-2]:.2f}")
+            c2.metric("股價淨值比 (P/B)", f"{info.get('priceToBook', 'N/A')}")
+            # RSI
+            delta = df_p['Close'].diff()
+            gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+            rsi = 100 - (100 / (1 + gain/loss)).iloc[-1]
+            c3.metric("RSI (14)", f"{rsi:.1f}")
+
+            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
+            fig.add_trace(go.Candlestick(x=df_p.index, open=df_p['Open'], high=df_p['High'], low=df_p['Low'], close=df_p['Close'], name='K線'), row=1, col=1)
+            fig.add_trace(go.Bar(x=df_p.index, y=df_p['Volume'], name='成交量', marker_color='#ced4da'), row=2, col=1)
+            fig.update_layout(height=600, xaxis_rangeslider_visible=False, template="plotly_white")
+            st.plotly_chart(fig, use_container_width=True)
 
     with tabs[1]:
-        # 獲利三率圖表
-        st.subheader("📌 獲利三率走勢 (毛利率 / 營益率 / 淨利率)")
-        # 篩選指標
-        types = ['Gross_Profit_Margin', 'Operating_Profit_Margin', 'Net_Profit_Margin_After_Tax']
-        df_filtered = df_fin[df_fin['type'].isin(types)]
-        
-        fig_fin = go.Figure()
-        for t in types:
-            data = df_filtered[df_filtered['type'] == t]
-            fig_fin.add_trace(go.Scatter(x=data['date'], y=data['value'], name=t, mode='lines+markers'))
-        fig_fin.update_layout(template="plotly_white", yaxis_title="百分比 (%)")
-        st.plotly_chart(fig_fin, use_container_width=True)
+        st.subheader("📌 獲利三率走勢 (季報)")
+        if not df_fin.empty:
+            types = ['Gross_Profit_Margin', 'Operating_Profit_Margin', 'Net_Profit_Margin_After_Tax']
+            df_filtered = df_fin[df_fin['type'].isin(types)]
+            fig_fin = go.Figure()
+            for t in types:
+                d = df_filtered[df_filtered['type'] == t]
+                fig_fin.add_trace(go.Scatter(x=d['date'], y=d['value'], name=t, mode='lines+markers'))
+            fig_fin.update_layout(template="plotly_white", yaxis_title="%")
+            st.plotly_chart(fig_fin, use_container_width=True)
+        else:
+            st.info("查無獲利三率數據 (ETF 無此資料)。")
 
     with tabs[2]:
-        # 法人買賣超
-        st.subheader("🦅 三大法人每日進出 (近 60 日)")
-        df_inst['net_buy'] = df_inst['buy'] - df_inst['sell']
-        
-        fig_inst = go.Figure()
-        for name in ['Foreign_Investor', 'Investment_Trust', 'Dealer_Self']:
-            d = df_inst[df_inst['name'] == name]
-            fig_inst.add_trace(go.Bar(x=d['date'], y=d['net_buy'], name=name))
-        fig_inst.update_layout(barmode='relative', template="plotly_white", title="法人買賣超 (張)")
-        st.plotly_chart(fig_inst, use_container_width=True)
+        st.subheader("🦅 三大法人每日淨買賣超 (張)")
+        if not df_inst.empty:
+            df_inst['net'] = df_inst['buy'] - df_inst['sell']
+            fig_inst = go.Figure()
+            inst_names = {'Foreign_Investor': '外資', 'Investment_Trust': '投信', 'Dealer_Self': '自營商'}
+            for k, v in inst_names.items():
+                d = df_inst[df_inst['name'] == k]
+                fig_inst.add_trace(go.Bar(x=d['date'], y=d['net'], name=v))
+            fig_inst.update_layout(barmode='relative', template="plotly_white")
+            st.plotly_chart(fig_inst, use_container_width=True)
+        else:
+            st.info("暫無籌碼數據。")
 
     with tabs[3]:
-        # 即時新聞 (Google RSS)
-        stock_id = ticker_input.split(".")[0]
-        rss = feedparser.parse(f"https://news.google.com/rss/search?q={stock_id}+股票&hl=zh-TW&gl=TW&ceid=TW:zh-Hant")
-        for e in rss.entries[:10]:
-            st.markdown(f'<div class="news-card"><b><a href="{e.link}" target="_blank">{re.sub(r" - .*$", "", e.title)}</a></b><br><small>{e.published}</small></div>', unsafe_allow_html=True)
+        st.subheader(f"🔥 市場即時情報 (最新發布優先)")
+        if news_list:
+            for n in news_list[:15]:
+                st.markdown(f"""
+                <div class="news-card">
+                    <a class="news-title" href="{n['link']}" target="_blank">{n['title']}</a>
+                    <div style="font-size: 13px; color: #666; margin-top: 8px;">來源: {n['source']} | 發佈時間: {n['display']}</div>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.warning("新聞抓取中...")
 
-    # 底部 AI 總結
-    st.markdown(generate_pro_ai_insight(df_p, df_inst, df_fin, ticker_input), unsafe_allow_html=True)
+    # --- 底部 AI 總結 ---
+    st.divider()
+    try:
+        recent_inst = df_inst.tail(3)
+        f_net = recent_inst[recent_inst['name'] == 'Foreign_Investor']['net'].sum() if not df_inst.empty else 0
+        st.markdown(f"""
+        <div class="ai-insight">
+            <h3 style="margin-top:0;">🤖 專業分析師總結 ({ticker_input})</h3>
+            <li><b>籌碼熱度：</b>近三日外資淨操作為 <b>{'買超' if f_net > 0 else '賣超'}</b>。</li>
+            <li><b>技術指標：</b>RSI 目前為 <b>{rsi:.1f}</b>，處於{'高檔' if rsi > 70 else '低檔' if rsi < 30 else '常態'}區間。</li>
+            <li><b>營運動能：</b>建議切換至「獲利三率」分頁觀察毛利率是否優於去年同期。</li>
+        </div>
+        """, unsafe_allow_html=True)
+    except: pass
 
 except Exception as e:
     st.error(f"系統異常：{e}")
