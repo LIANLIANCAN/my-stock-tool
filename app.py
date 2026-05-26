@@ -36,44 +36,48 @@ ticker_input = st.sidebar.text_input("輸入證券代碼 (如 2330.TW)", value="
 st.sidebar.write(f"台北時間：{now_tw.strftime('%Y-%m-%d %H:%M')}")
 
 # ==========================================
-# 2. 核心數據引擎 (終極防禦版)
+# 2. 核心數據引擎 (移除不穩定的 info 快取)
 # ==========================================
 @st.cache_data(ttl=300)
-def get_professional_data(ticker):
+def get_finmind_base_data(ticker):
+    """只快取穩定的 FinMind 數據"""
     try:
         from FinMind.data import DataLoader
         dl = DataLoader()
     except ImportError:
-        st.error("系統環境建置中，請點擊右下角 'Manage app' -> 'Reboot App'。")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), [], {}
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     stock_id = ticker.split(".")[0]
     start_d = (now_tw - timedelta(days=365)).strftime('%Y-%m-%d')
     
-    # [1] 股價與成交量
+    # 股價與成交量
     df_p = dl.taiwan_stock_daily(stock_id=stock_id, start_date=start_d)
     if not df_p.empty:
-        # 自動偵測成交量欄位
         vol_col = next((c for c in df_p.columns if c in ['vol', 'Trading_Shares', 'Volume']), None)
         rename_map = {'date':'Date', 'open':'Open', 'max':'High', 'min':'Low', 'close':'Close'}
         if vol_col: rename_map[vol_col] = 'Volume'
-        
         df_p = df_p.rename(columns=rename_map)
-        if 'Volume' not in df_p.columns: df_p['Volume'] = 0 # 終極防禦
+        if 'Volume' not in df_p.columns: df_p['Volume'] = 0
         df_p['Date'] = pd.to_datetime(df_p['Date'])
         df_p.set_index('Date', inplace=True)
 
-    # [2] 三大法人籌碼
+    # 三大法人籌碼
     try:
         df_inst = dl.taiwan_stock_institutional_investors(stock_id=stock_id, start_date=(now_tw - timedelta(days=60)).strftime('%Y-%m-%d'))
     except: df_inst = pd.DataFrame()
     
-    # [3] 原始財報數據
+    # 原始財報數據
     try:
         df_fin = dl.taiwan_stock_financial_statement(stock_id=stock_id, start_date='2022-01-01')
     except: df_fin = pd.DataFrame()
+        
+    return df_p, df_inst, df_fin
 
-    # [4] Google 即時新聞 (精準排序)
+# 不加入 st.cache_data 快取，避免 yfinance 觸發 Python 3.14 的 TypeError 漏洞
+def get_live_info_and_news(ticker):
+    stock_id = ticker.split(".")[0]
+    
+    # [1] 抓取 Google 即時新聞
     query = f"{stock_id}+股票" if ".TW" in ticker else ticker
     rss = feedparser.parse(f"https://news.google.com/rss/search?q={query}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant")
     news_items = []
@@ -88,20 +92,31 @@ def get_professional_data(ticker):
                 "display": dt.strftime('%m-%d %H:%M')
             })
         except: continue
-    news_items.sort(key=lambda x: x['ts'], reverse=True) # 最新發布優先
+    news_items.sort(key=lambda x: x['ts'], reverse=True)
     
-    # [5] 估值基本面
-    try: info = yf.Ticker(ticker).info
-    except: info = {}
+    # [2] 安全抓取 yfinance info (防止 None 導致系統崩潰)
+    info = {}
+    try:
+        yf_obj = yf.Ticker(ticker)
+        if yf_obj and hasattr(yf_obj, 'info') and yf_obj.info is not None:
+            info = yf_obj.info
+    except:
+        info = {}
         
-    return df_p, df_inst, df_fin, news_items, info
+    return news_items, info
 
 # ==========================================
-# 3. 系統主程式渲染
+# 3. 系統主程式呈現
 # ==========================================
 try:
-    df_p, df_inst, df_fin, news_list, info = get_professional_data(ticker_input)
+    # 分流讀取數據
+    df_p, df_inst, df_fin = get_finmind_base_data(ticker_input)
+    news_list, info = get_live_info_and_news(ticker_input)
 
+    # 如果 FinMind 套件還在安裝中，顯示提示
+    if df_p.empty and df_inst.empty and df_fin.empty:
+        st.info("⏳ 系統首度環境建置中，請等候 1 分鐘後點擊右下角 'Manage app' -> 'Reboot App'。")
+    
     tabs = st.tabs(["📉 技術 & RSI", "📊 獲利三率", "🦅 三大法人籌碼", "📰 即時市場情報"])
 
     # ------------------------------------------
@@ -120,12 +135,14 @@ try:
                 rsi = 100 - (100 / (1 + gain/loss)).iloc[-1]
             else: rsi = 50.0
 
+            pb_val = info.get('priceToBook', 'N/A') if info else 'N/A'
+
             st.markdown(f"""
             <div class="ai-insight ai-tech">
                 <h4 style="margin-top:0;">🤖 價格行為與技術面研判</h4>
                 <li><b>趨勢強度：</b>目前股價 {'大於' if curr_p > ma20 else '小於'} 月均線 (20MA)，短期趨勢偏向 <b>{'多頭' if curr_p > ma20 else '空頭'}</b>。</li>
                 <li><b>動能指標：</b>RSI(14) 為 {rsi:.1f}，顯示市場情緒處於 <b>{'過熱' if rsi > 70 else '超賣' if rsi < 30 else '常態穩健'}</b> 狀態。</li>
-                <li><b>估值參考：</b>目前 P/B 比為 {info.get('priceToBook', 'N/A')}。</li>
+                <li><b>估值參考：</b>目前 P/B 比為 {pb_val}。</li>
             </div>
             """, unsafe_allow_html=True)
 
@@ -134,7 +151,6 @@ try:
             c2.metric("月均線 (20MA)", f"{ma20:.2f}")
             c3.metric("RSI (14)", f"{rsi:.1f}")
 
-            # K線圖繪製
             fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
             fig.add_trace(go.Candlestick(x=df_p.index, open=df_p['Open'], high=df_p['High'], low=df_p['Low'], close=df_p['Close'], name='K線'), row=1, col=1)
             volume_data = df_p.get('Volume', pd.Series(0, index=df_p.index))
@@ -142,18 +158,15 @@ try:
             fig.update_layout(height=500, xaxis_rangeslider_visible=False, template="plotly_white", margin=dict(t=20, b=20))
             st.plotly_chart(fig, use_container_width=True)
 
-            # 中文化數據表
             with st.expander("📄 檢視歷史價格明細數據 (中文版)"):
                 display_df = df_p.tail(10).sort_index(ascending=False).copy()
                 tw_columns = {'Open': '開盤價', 'High': '最高價', 'Low': '最低價', 'Close': '收盤價', 'Volume': '成交量'}
                 display_df = display_df.rename(columns=tw_columns)
                 display_df.index.name = '日期'
                 st.dataframe(display_df, use_container_width=True)
-        else:
-            st.warning("⚠️ 無法取得股價資料，請確認代碼是否正確。")
 
     # ------------------------------------------
-    # 分頁 2: 財報分析 (三率精算)
+    # 分頁 2: 財報分析
     # ------------------------------------------
     with tabs[1]:
         if not df_fin.empty:
@@ -177,7 +190,6 @@ try:
             
             if plot_data:
                 df_plot = pd.DataFrame(plot_data)
-                
                 latest_gross = df_plot['毛利率'].dropna().iloc[-1] if df_plot['毛利率'].notna().any() else 0
                 prev_gross = df_plot['毛利率'].dropna().iloc[-2] if len(df_plot['毛利率'].dropna()) > 1 else 0
                 
@@ -190,7 +202,7 @@ try:
                 """, unsafe_allow_html=True)
 
                 fig_fin = go.Figure()
-                for col, color in zip(['毛利率', '營益率', '淨利率'], ['#1f77b4', '#ff7f0e', '#2ca02c']):
+                for col in ['毛利率', '營益率', '淨利率']:
                     if df_plot[col].notna().any():
                         fig_fin.add_trace(go.Scatter(x=df_plot['date'], y=df_plot[col], name=col, mode='lines+markers', line=dict(width=2)))
                 fig_fin.update_layout(template="plotly_white", yaxis_title="百分比 (%)", hovermode="x unified", margin=dict(t=20, b=20))
@@ -199,9 +211,9 @@ try:
                 with st.expander("📄 檢視獲利三率具體數值 (季報)"):
                     st.dataframe(df_plot.set_index('date').sort_index(ascending=False).style.format("{:.2f}%"), use_container_width=True)
             else:
-                st.warning("⚠️ 無法解析出百分比利潤數據。")
+                st.warning("無法解析出百分比利潤數據。")
         else:
-            st.info("💡 查無財報數據 (ETF 無此資料)。")
+            st.info("💡 查查技術面與籌碼面即可 (ETF 無單公司財報數據)。")
 
     # ------------------------------------------
     # 分頁 3: 籌碼分析
@@ -229,10 +241,10 @@ try:
             fig_inst.update_layout(barmode='relative', template="plotly_white", margin=dict(t=20, b=20))
             st.plotly_chart(fig_inst, use_container_width=True)
         else:
-            st.info("💡 查無三大法人籌碼數據。")
+            st.info("💡 暫無籌碼數據。")
 
     # ------------------------------------------
-    # 分頁 4: 新聞
+    # 分頁 4: 即時情報
     # ------------------------------------------
     with tabs[3]:
         st.subheader(f"🔥 市場即時情報 (自動最新排序)")
@@ -245,7 +257,7 @@ try:
                 </div>
                 """, unsafe_allow_html=True)
         else:
-            st.warning("⚠️ 新聞抓取中，若持續無資料請稍後再試。")
+            st.warning("即時新聞載入中...")
 
 except Exception as e:
-    st.error(f"系統異常：請確保輸入正確的代碼並 Reboot App。詳細錯誤: {e}")
+    st.error(f"系統運行提示：請點擊右下角 'Manage app' -> 'Reboot App' 初始化環境。")
